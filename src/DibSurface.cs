@@ -42,15 +42,15 @@ namespace Loupe
 
         /// <summary>
         /// Shows this surface in a per-pixel-alpha layered window at <paramref name="position"/>,
-        /// scaled around its centre and faded according to the animation's appearance.
+        /// scaled around its centre and faded by <paramref name="opacity"/>.
         /// </summary>
-        public void Present(IntPtr hwnd, Point position, float appearance)
+        public void Present(IntPtr hwnd, Point position, float opacity, float scale)
         {
             IntPtr source = DC;
-            if (appearance < 0.999f)
+            if (scale < 0.999f)
             {
                 if (scratch == null) scratch = new DibSurface(Width, Height);
-                DrawScaled(scratch, LensAnimation.ScaleFor(appearance));
+                DrawScaled(scratch, scale);
                 source = scratch.DC;
             }
 
@@ -60,7 +60,7 @@ namespace Loupe
             var blend = new Native.BLENDFUNCTION
             {
                 BlendOp = Native.AC_SRC_OVER,
-                SourceConstantAlpha = (byte)Math.Round(255 * Math.Max(0f, Math.Min(1f, appearance))),
+                SourceConstantAlpha = (byte)Math.Round(255 * Math.Max(0f, Math.Min(1f, opacity))),
                 AlphaFormat = Native.AC_SRC_ALPHA,
             };
             Native.UpdateLayeredWindow(hwnd, IntPtr.Zero, ref dst, ref size, source, ref origin, 0,

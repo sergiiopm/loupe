@@ -2,48 +2,42 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace Loupe
 {
     /// <summary>
-    /// Tray application: listens for modifier + mouse wheel through a low-level mouse hook
-    /// and animates the zoom level, driving either the lens window or full-screen magnification.
+    /// Tray application: turns modifier + mouse wheel into an eased zoom level and renders it with
+    /// either a lens window or full-screen magnification, one frame per display refresh.
     /// </summary>
     class LoupeApp : ApplicationContext
     {
         const double MaxZoom = 20.0;
         const double ZoomStepPerNotch = 1.25;
         const double ResizeStepPerNotch = 1.1;
-        const double Easing = 0.3;
+        const double ZoomEasingSeconds = 0.045; // time constant of the exponential zoom easing
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
         readonly Settings settings = Settings.Load();
         readonly NotifyIcon tray = new NotifyIcon();
+        readonly Control uiThread = new Control(); // marshals hook events onto the UI thread
+        readonly FullscreenMagnifier fullscreen = new FullscreenMagnifier();
+        readonly Stopwatch clock = Stopwatch.StartNew();
+        readonly InputHooks hooks;
         LensWindow privateLens;
         RecordableLensWindow recordableLens;
-        readonly FullscreenMagnifier fullscreen = new FullscreenMagnifier();
-        readonly Timer timer = new Timer { Interval = 15 };
-        readonly Native.LowLevelHookProc mouseProc;
-        readonly Native.LowLevelHookProc keyboardProc;
-        readonly IntPtr mouseHook;
-        readonly IntPtr keyboardHook;
 
         double targetZoom = 1.0;
         double currentZoom = 1.0;
+        bool rendering;
+        double lastFrameTime;
 
         public LoupeApp()
         {
-            // Keep the delegates in fields so they stay alive while the hooks are installed.
-            mouseProc = MouseHookCallback;
-            keyboardProc = KeyboardHookCallback;
-            IntPtr module = Native.GetModuleHandle(null);
-            mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseProc, module, 0);
-            keyboardHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, keyboardProc, module, 0);
-
-            timer.Tick += delegate { Tick(); };
+            IntPtr createHandle = uiThread.Handle;
+            Application.Idle += OnIdle;
+            hooks = new InputHooks(OnWheelHook, OnEscapeHook);
 
             tray.Icon = LoadIcon();
             tray.Text = "Loupe";
@@ -51,7 +45,7 @@ namespace Loupe
             tray.DoubleClick += delegate { ShowHelp(); };
             BuildMenu();
 
-            if (mouseHook == IntPtr.Zero)
+            if (!hooks.IsInstalled)
             {
                 MessageBox.Show(T("Could not install the mouse hook.", "No se pudo instalar el gancho del ratón."),
                                 "Loupe", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -61,6 +55,16 @@ namespace Loupe
             tray.ShowBalloonTip(3000, T("Loupe is running", "Loupe está activo"),
                 ShortcutLabel + T(" + scroll to zoom. Esc to close.", " + rueda para ampliar. Esc para cerrar."),
                 ToolTipIcon.None);
+            uiThread.BeginInvoke((Action)PrepareLens);
+        }
+
+        /// <summary>Creates the lens and its shadow up front so the first zoom opens without a hitch.</summary>
+        void PrepareLens()
+        {
+            if (settings.Mode != ZoomMode.Lens) return;
+            Native.POINT p;
+            Native.GetCursorPos(out p);
+            Lens.Prepare(new Point(p.X, p.Y), settings);
         }
 
         static string T(string english, string spanish)
@@ -86,30 +90,6 @@ namespace Loupe
 
         // ---------------------------------------------------------------- input
 
-        IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            if (nCode >= 0 && wParam.ToInt32() == Native.WM_MOUSEWHEEL)
-            {
-                var data = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
-                int delta = unchecked((short)(data.mouseData >> 16));
-                if (OnWheel(delta))
-                    return new IntPtr(1); // swallow the scroll so the app underneath doesn't see it
-            }
-            return Native.CallNextHookEx(mouseHook, nCode, wParam, lParam);
-        }
-
-        // Esc closes the zoom. A hook (rather than polling) guarantees even a quick tap is seen;
-        // the key is passed on untouched.
-        IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            if (nCode >= 0 && targetZoom > 1.0 && wParam.ToInt32() == Native.WM_KEYDOWN
-                && Marshal.ReadInt32(lParam) == Native.VK_ESCAPE)
-            {
-                targetZoom = 1.0;
-            }
-            return Native.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
-        }
-
         static bool IsKeyDown(int vk)
         {
             return (Native.GetAsyncKeyState(vk) & 0x8000) != 0;
@@ -121,14 +101,27 @@ namespace Loupe
             return settings.Shortcut == Shortcut.Ctrl || IsKeyDown(Native.VK_MENU);
         }
 
-        bool OnWheel(int delta)
+        // Hook thread: decide right away whether to swallow the wheel, handle it on the UI thread.
+        bool OnWheelHook(int delta)
         {
             if (!IsShortcutHeld()) return false;
+            bool resize = IsKeyDown(Native.VK_SHIFT);
+            uiThread.BeginInvoke((Action)(() => OnWheel(delta, resize)));
+            return true;
+        }
 
+        // Hook thread: Esc closes the zoom. A hook (rather than polling) sees even a quick tap.
+        void OnEscapeHook()
+        {
+            uiThread.BeginInvoke((Action)(() => { if (targetZoom > 1.0) targetZoom = 1.0; }));
+        }
+
+        void OnWheel(int delta, bool resize)
+        {
             // Delta isn't always a multiple of 120 (precision touchpads), so work in fractional notches.
             double notches = delta / 120.0;
 
-            if (IsKeyDown(Native.VK_SHIFT) && settings.Mode == ZoomMode.Lens)
+            if (resize && settings.Mode == ZoomMode.Lens)
             {
                 int width = (int)Math.Round(settings.LensWidth * Math.Pow(ResizeStepPerNotch, notches));
                 settings.LensWidth = Math.Max(Settings.MinLensWidth, Math.Min(Settings.MaxLensWidth, width));
@@ -142,15 +135,33 @@ namespace Loupe
                 if (targetZoom > MaxZoom) targetZoom = MaxZoom;
             }
 
-            timer.Start();
-            return true;
+            if (!rendering)
+            {
+                rendering = true;
+                lastFrameTime = clock.Elapsed.TotalSeconds;
+            }
         }
 
-        // ---------------------------------------------------------------- animation
+        // ---------------------------------------------------------------- rendering
 
-        void Tick()
+        // Render loop: while zooming, draw frames back to back whenever the UI thread has no messages
+        // waiting, so the tray menu and window painting stay responsive. Each frame is paced by the
+        // compositor, giving one frame per display refresh.
+        void OnIdle(object sender, EventArgs e)
         {
-            currentZoom += (targetZoom - currentZoom) * Easing;
+            Native.MSG msg;
+            while (rendering && !Native.PeekMessage(out msg, IntPtr.Zero, 0, 0, Native.PM_NOREMOVE))
+                RenderFrame();
+        }
+
+        void RenderFrame()
+        {
+            double now = clock.Elapsed.TotalSeconds;
+            double elapsed = Math.Min(0.1, now - lastFrameTime);
+            lastFrameTime = now;
+
+            // Exponential easing towards the target, independent of the frame rate.
+            currentZoom += (targetZoom - currentZoom) * (1 - Math.Exp(-elapsed / ZoomEasingSeconds));
             if (Math.Abs(targetZoom - currentZoom) < 0.004) currentZoom = targetZoom;
 
             Native.POINT p;
@@ -158,11 +169,12 @@ namespace Loupe
             var cursor = new Point(p.X, p.Y);
 
             bool zoomed = currentZoom > 1.001;
+            bool waitedForCompositor = false;
             if (settings.Mode == ZoomMode.Lens)
             {
                 // The lens starts its exit animation as soon as the target drops to 1×,
                 // while the magnification keeps easing out underneath it.
-                Lens.Update(cursor, currentZoom, settings, targetZoom > 1.0);
+                waitedForCompositor = Lens.Update(cursor, currentZoom, settings, targetZoom > 1.0);
             }
             else
             {
@@ -170,13 +182,22 @@ namespace Loupe
                 else fullscreen.Reset();
             }
 
-            if (!zoomed && !Lens.IsShown) timer.Stop();
+            if (!zoomed && !Lens.IsShown)
+            {
+                rendering = false;
+                return;
+            }
+
+            // Wait for the next composition unless the frame already did, so we never draw faster
+            // than the display can show.
+            if (!waitedForCompositor && Native.DwmFlush() != 0)
+                System.Threading.Thread.Sleep(8);
         }
 
         void ResetZoom()
         {
             targetZoom = currentZoom = 1.0;
-            timer.Stop();
+            rendering = false;
             if (privateLens != null) privateLens.HideLens();
             if (recordableLens != null) recordableLens.HideLens();
             fullscreen.Reset();
@@ -255,6 +276,7 @@ namespace Loupe
             ResetZoom();
             settings.Save();
             BuildMenu();
+            PrepareLens();
         }
 
         void ShowHelp()
@@ -298,14 +320,15 @@ namespace Loupe
         {
             ResetZoom();
             settings.Save();
-            if (mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(mouseHook);
-            if (keyboardHook != IntPtr.Zero) Native.UnhookWindowsHookEx(keyboardHook);
+            hooks.Dispose();
+            Application.Idle -= OnIdle;
             fullscreen.Dispose();
             tray.Visible = false;
             tray.Dispose();
             if (privateLens != null) privateLens.Dispose();
             if (recordableLens != null) recordableLens.Dispose();
             Magnification.Shutdown();
+            uiThread.Dispose();
             ExitThread();
         }
     }

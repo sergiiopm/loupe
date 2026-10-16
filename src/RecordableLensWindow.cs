@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -12,6 +13,9 @@ namespace Loupe
     /// while skipping the lens's own windows, so the lens can stay visible to capture tools.
     /// The rounded corners come from a window region, so they aren't anti-aliased; the shadow and
     /// hairline edge live in a separate per-pixel-alpha window just beneath the lens.
+    ///
+    /// Every magnifier call waits for the next composition, so this lens only calls it when something
+    /// actually changed, and fades in and out instead of growing (resizing costs several frames).
     /// </summary>
     sealed class RecordableLensWindow : Form, ILens
     {
@@ -20,7 +24,9 @@ namespace Loupe
         IntPtr magnifier;
         LensChrome chrome;
         DibSurface shadowSurface;
-        Size regionSize;
+        Size lensSize;
+        float magnification;
+        int lensAlpha = -1, shadowAlpha = -1;
         bool? smoothing;
         bool visible;
 
@@ -51,7 +57,7 @@ namespace Loupe
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Native.SetLayeredWindowAttributes(Handle, 0, 255, Native.LWA_ALPHA);
+            Native.SetLayeredWindowAttributes(Handle, 0, 0, Native.LWA_ALPHA);
             if (!Magnification.EnsureInitialized()) return;
 
             magnifier = Native.CreateWindowEx(0, "Magnifier", null, Native.WS_CHILD | Native.WS_VISIBLE,
@@ -67,26 +73,18 @@ namespace Loupe
             get { return visible; }
         }
 
-        public void Update(Point cursor, double zoom, Settings settings, bool show)
+        public bool Update(Point cursor, double zoom, Settings settings, bool show)
         {
             float appearance;
             if (!animation.Step(show, out appearance))
             {
                 HideLens();
-                return;
+                return false;
             }
-            if (magnifier == IntPtr.Zero) return;
+            if (magnifier == IntPtr.Zero) return false;
 
-            float dpiScale = Native.GetScaleAt(cursor);
-            int width = (int)Math.Round(settings.LensWidth * dpiScale);
-            int height = (int)Math.Round(settings.LensHeight * dpiScale);
-            if (chrome == null || !chrome.Matches(width, height, dpiScale))
-            {
-                chrome = new LensChrome(width, height, dpiScale);
-                if (shadowSurface != null) shadowSurface.Dispose();
-                shadowSurface = new DibSurface(chrome.Width, chrome.Height);
-                PaintShadow();
-            }
+            bool chromeChanged = EnsureChrome(cursor, settings);
+            int width = chrome.LensWidth, height = chrome.LensHeight;
 
             if (smoothing != settings.Smooth)
             {
@@ -94,54 +92,98 @@ namespace Loupe
                 Magnification.SetSmoothing(magnifier, settings.Smooth);
             }
 
-            // During the animation the whole lens scales as one image, like the default lens.
-            float animationScale = LensAnimation.ScaleFor(appearance);
-            int lensWidth = Math.Max(1, (int)Math.Round(width * animationScale));
-            int lensHeight = Math.Max(1, (int)Math.Round(height * animationScale));
-            double magnification = Math.Max(1.0, zoom) * animationScale;
+            var lensPosition = new Point(cursor.X - width / 2, cursor.Y - height / 2);
+            var shadowPosition = new Point(lensPosition.X - chrome.Margin, lensPosition.Y - chrome.Margin);
+            int alpha = (int)Math.Round(255 * appearance);
 
-            // Shadow first, then the lens on top of it.
-            shadowSurface.Present(shadow.Handle,
-                new Point(cursor.X - width / 2 - chrome.Margin, cursor.Y - height / 2 - chrome.Margin), appearance);
-            shadow.BringToTop();
-
-            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, cursor.X - lensWidth / 2, cursor.Y - lensHeight / 2,
-                                lensWidth, lensHeight, Native.SWP_NOACTIVATE);
-            if (regionSize.Width != lensWidth || regionSize.Height != lensHeight)
+            // The shadow's pixels only need re-sending while it fades or after a resize.
+            bool shadowRepainted = chromeChanged || alpha != shadowAlpha;
+            if (shadowRepainted)
             {
-                regionSize = new Size(lensWidth, lensHeight);
-                int diameter = (int)Math.Round(chrome.CornerRadius * animationScale * 2);
-                Native.SetWindowRgn(Handle, Native.CreateRoundRectRgn(0, 0, lensWidth + 1, lensHeight + 1, diameter, diameter), true);
-                Native.SetWindowPos(magnifier, IntPtr.Zero, 0, 0, lensWidth, lensHeight,
-                                    Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+                shadowSurface.Present(shadow.Handle, shadowPosition, appearance, 1f);
+                shadowAlpha = alpha;
             }
-            Native.SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(255 * appearance), Native.LWA_ALPHA);
 
-            // Source area: centred on the pointer, kept inside the desktop.
-            double sourceWidth = lensWidth / magnification, sourceHeight = lensHeight / magnification;
-            Rectangle desktop = SystemInformation.VirtualScreen;
-            int sourceX = (int)Math.Round(Clamp(cursor.X - sourceWidth / 2, desktop.Left, desktop.Right - sourceWidth));
-            int sourceY = (int)Math.Round(Clamp(cursor.Y - sourceHeight / 2, desktop.Top, desktop.Bottom - sourceHeight));
+            if (lensSize.Width != width || lensSize.Height != height)
+            {
+                lensSize = new Size(width, height);
+                int diameter = (int)Math.Round(chrome.CornerRadius * 2);
+                Native.SetWindowRgn(Handle, Native.CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter), true);
+                Native.SetWindowPos(magnifier, IntPtr.Zero, 0, 0, width, height, Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            }
 
-            var transform = new Native.MAGTRANSFORM
+            // Move the lens and its shadow together so they land in the same composed frame, keeping
+            // the shadow directly beneath the lens. (A repainted shadow was already moved above.)
+            uint shadowFlags = Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | (shadowRepainted ? Native.SWP_NOMOVE : 0);
+            IntPtr batch = Native.BeginDeferWindowPos(2);
+            batch = Native.DeferWindowPos(batch, Handle, Native.HWND_TOPMOST, lensPosition.X, lensPosition.Y,
+                                          width, height, Native.SWP_NOACTIVATE);
+            batch = Native.DeferWindowPos(batch, shadow.Handle, Handle, shadowPosition.X, shadowPosition.Y, 0, 0,
+                                          shadowFlags);
+            Native.EndDeferWindowPos(batch);
+
+            if (alpha != lensAlpha)
             {
-                v = new[] { (float)magnification, 0f, 0f, 0f, (float)magnification, 0f, 0f, 0f, 1f },
-            };
-            Native.MagSetWindowTransform(magnifier, ref transform);
-            Native.MagSetWindowSource(magnifier, new Native.RECT
-            {
-                Left = sourceX,
-                Top = sourceY,
-                Right = sourceX + (int)Math.Round(sourceWidth),
-                Bottom = sourceY + (int)Math.Round(sourceHeight),
-            });
-            Native.InvalidateRect(magnifier, IntPtr.Zero, true);
+                Native.SetLayeredWindowAttributes(Handle, 0, (byte)alpha, Native.LWA_ALPHA);
+                lensAlpha = alpha;
+            }
 
             if (!visible)
             {
+                Native.ShowWindow(shadow.Handle, Native.SW_SHOWNOACTIVATE);
                 Native.ShowWindow(Handle, Native.SW_SHOWNOACTIVATE);
                 visible = true;
             }
+
+            long started = Stopwatch.GetTimestamp();
+            UpdateMagnifier(cursor, (float)Math.Max(1.0, zoom), width, height);
+            double waitedMs = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
+            return waitedMs > 2.0;
+        }
+
+        void UpdateMagnifier(Point cursor, float zoom, int width, int height)
+        {
+            if (zoom != magnification)
+            {
+                magnification = zoom;
+                var transform = new Native.MAGTRANSFORM { v = new[] { zoom, 0f, 0f, 0f, zoom, 0f, 0f, 0f, 1f } };
+                Native.MagSetWindowTransform(magnifier, ref transform);
+            }
+
+            // Source area: centred on the pointer, kept inside the desktop. Set every frame, even when
+            // unchanged, so moving content underneath (videos, typing) stays live. Setting the source
+            // repaints the control by itself; an extra InvalidateRect would cost another frame.
+            double sourceWidth = width / zoom, sourceHeight = height / zoom;
+            Rectangle desktop = SystemInformation.VirtualScreen;
+            int x = (int)Math.Round(Clamp(cursor.X - sourceWidth / 2, desktop.Left, desktop.Right - sourceWidth));
+            int y = (int)Math.Round(Clamp(cursor.Y - sourceHeight / 2, desktop.Top, desktop.Bottom - sourceHeight));
+            Native.MagSetWindowSource(magnifier, new Native.RECT
+            {
+                Left = x,
+                Top = y,
+                Right = x + (int)Math.Round(sourceWidth),
+                Bottom = y + (int)Math.Round(sourceHeight),
+            });
+        }
+
+        public void Prepare(Point cursor, Settings settings)
+        {
+            EnsureChrome(cursor, settings);
+        }
+
+        /// <summary>Builds the shadow for the current size and DPI if needed; returns true if it did.</summary>
+        bool EnsureChrome(Point cursor, Settings settings)
+        {
+            float dpiScale = Native.GetScaleAt(cursor);
+            int width = (int)Math.Round(settings.LensWidth * dpiScale);
+            int height = (int)Math.Round(settings.LensHeight * dpiScale);
+            if (chrome != null && chrome.Matches(width, height, dpiScale)) return false;
+
+            chrome = new LensChrome(width, height, dpiScale);
+            if (shadowSurface != null) shadowSurface.Dispose();
+            shadowSurface = new DibSurface(chrome.Width, chrome.Height);
+            PaintShadow();
+            return true;
         }
 
         public void HideLens()
@@ -149,7 +191,9 @@ namespace Loupe
             animation.Reset();
             if (!visible) return;
             Native.ShowWindow(Handle, Native.SW_HIDE);
-            shadow.HideNow();
+            Native.ShowWindow(shadow.Handle, Native.SW_HIDE);
+            Native.SetLayeredWindowAttributes(Handle, 0, 0, Native.LWA_ALPHA);
+            lensAlpha = shadowAlpha = -1;
             visible = false;
         }
 
@@ -186,8 +230,6 @@ namespace Loupe
         /// <summary>Click-through per-pixel-alpha window that carries the lens's shadow.</summary>
         sealed class ShadowWindow : Form
         {
-            bool visible;
-
             public ShadowWindow()
             {
                 FormBorderStyle = FormBorderStyle.None;
@@ -210,24 +252,6 @@ namespace Loupe
                                 | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOPMOST;
                     return cp;
                 }
-            }
-
-            public void BringToTop()
-            {
-                if (!visible)
-                {
-                    Native.ShowWindow(Handle, Native.SW_SHOWNOACTIVATE);
-                    visible = true;
-                }
-                Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
-                                    Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-            }
-
-            public void HideNow()
-            {
-                if (!visible) return;
-                Native.ShowWindow(Handle, Native.SW_HIDE);
-                visible = false;
             }
         }
     }

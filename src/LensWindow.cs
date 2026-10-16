@@ -51,24 +51,17 @@ namespace Loupe
             get { return visible; }
         }
 
-        public void Update(Point cursor, double zoom, Settings settings, bool show)
+        public bool Update(Point cursor, double zoom, Settings settings, bool show)
         {
             float appearance;
             if (!animation.Step(show, out appearance))
             {
                 HideLens();
-                return;
+                return false;
             }
 
-            float scale = Native.GetScaleAt(cursor);
-            int width = (int)Math.Round(settings.LensWidth * scale);
-            int height = (int)Math.Round(settings.LensHeight * scale);
-            if (chrome == null || !chrome.Matches(width, height, scale))
-            {
-                chrome = new LensChrome(width, height, scale);
-                if (surface != null) surface.Dispose();
-                surface = new DibSurface(chrome.Width, chrome.Height);
-            }
+            EnsureChrome(cursor, settings);
+            int width = chrome.LensWidth, height = chrome.LensHeight;
 
             // Source area: centred on the pointer, kept inside the desktop.
             zoom = Math.Max(1.0, zoom);
@@ -95,7 +88,7 @@ namespace Loupe
 
             Composite();
             surface.Present(Handle, new Point(cursor.X - width / 2 - chrome.Margin, cursor.Y - height / 2 - chrome.Margin),
-                            appearance);
+                            appearance, LensAnimation.ScaleFor(appearance));
 
             if (!visible)
             {
@@ -104,6 +97,24 @@ namespace Loupe
             }
             Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
                                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+            return false;
+        }
+
+        public void Prepare(Point cursor, Settings settings)
+        {
+            EnsureChrome(cursor, settings);
+        }
+
+        void EnsureChrome(Point cursor, Settings settings)
+        {
+            float scale = Native.GetScaleAt(cursor);
+            int width = (int)Math.Round(settings.LensWidth * scale);
+            int height = (int)Math.Round(settings.LensHeight * scale);
+            if (chrome != null && chrome.Matches(width, height, scale)) return;
+
+            chrome = new LensChrome(width, height, scale);
+            if (surface != null) surface.Dispose();
+            surface = new DibSurface(chrome.Width, chrome.Height);
         }
 
         public void HideLens()

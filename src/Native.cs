@@ -9,7 +9,8 @@ namespace Loupe
     {
         // Hooks and input
         public const int WH_KEYBOARD_LL = 13, WH_MOUSE_LL = 14;
-        public const int WM_KEYDOWN = 0x0100, WM_MOUSEWHEEL = 0x020A;
+        public const int WM_QUIT = 0x0012, WM_KEYDOWN = 0x0100, WM_MOUSEWHEEL = 0x020A;
+        public const uint PM_NOREMOVE = 0x0;
         public const int VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, VK_ESCAPE = 0x1B;
 
         // Windows
@@ -45,6 +46,16 @@ namespace Loupe
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSG
+        {
+            public IntPtr hwnd;
+            public uint message;
+            public IntPtr wParam, lParam;
+            public uint time;
+            public POINT pt;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         public struct MAGTRANSFORM
@@ -94,6 +105,13 @@ namespace Loupe
         [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hook);
         [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
+        [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] public static extern int GetMessage(out MSG msg, IntPtr hwnd, uint filterMin, uint filterMax);
+        [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG msg, IntPtr hwnd, uint filterMin, uint filterMax, uint remove);
+        [DllImport("user32.dll")] public static extern bool TranslateMessage(ref MSG msg);
+        [DllImport("user32.dll")] public static extern IntPtr DispatchMessage(ref MSG msg);
+        [DllImport("user32.dll")] public static extern bool PostThreadMessage(uint threadId, int msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("dwmapi.dll")] public static extern int DwmFlush();
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
 
@@ -108,6 +126,10 @@ namespace Loupe
         [DllImport("user32.dll")]
         public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dstDC, ref POINT dstPos, ref SIZE size,
             IntPtr srcDC, ref POINT srcPos, uint colorKey, ref BLENDFUNCTION blend, uint flags);
+        [DllImport("user32.dll")] public static extern IntPtr BeginDeferWindowPos(int count);
+        [DllImport("user32.dll")]
+        public static extern IntPtr DeferWindowPos(IntPtr batch, IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] public static extern bool EndDeferWindowPos(IntPtr batch);
         [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
 
@@ -129,7 +151,6 @@ namespace Loupe
         public static extern IntPtr CreateWindowEx(int exStyle, string className, string windowName, int style,
             int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
         [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint colorKey, byte alpha, uint flags);
-        [DllImport("user32.dll")] public static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
         [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
         [DllImport("gdi32.dll")] public static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
 
