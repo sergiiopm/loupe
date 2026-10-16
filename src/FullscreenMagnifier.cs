@@ -7,13 +7,11 @@ namespace Loupe
     /// <summary>Whole-screen zoom on the primary monitor via the Windows Magnification API.</summary>
     sealed class FullscreenMagnifier : IDisposable
     {
-        bool initialized;
         bool active;
 
         public void Apply(Point cursor, double zoom)
         {
-            if (!initialized) initialized = Native.MagInitialize();
-            if (!initialized) return;
+            if (!Magnification.EnsureInitialized()) return;
 
             // Keep the pointer at the centre of the magnified view, clamped to the screen edges.
             Rectangle screen = Screen.PrimaryScreen.Bounds;
@@ -35,8 +33,6 @@ namespace Loupe
         public void Dispose()
         {
             Reset();
-            if (initialized) Native.MagUninitialize();
-            initialized = false;
         }
     }
 }

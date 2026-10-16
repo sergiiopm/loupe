@@ -20,6 +20,10 @@ namespace Loupe
         public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
         public const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4;
         public const uint ULW_ALPHA = 0x2;
+        public const uint LWA_ALPHA = 0x2;
+        public const int WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000;
+        public const uint SWP_NOZORDER = 0x4;
+        public const int MW_FILTERMODE_EXCLUDE = 0;
         public const byte AC_SRC_OVER = 0x0, AC_SRC_ALPHA = 0x1;
 
         // DPI
@@ -38,6 +42,16 @@ namespace Loupe
 
         [StructLayout(LayoutKind.Sequential)]
         public struct SIZE { public int cx, cy; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MAGTRANSFORM
+        {
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 9)]
+            public float[] v;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         public struct MSLLHOOKSTRUCT
@@ -111,8 +125,21 @@ namespace Loupe
         [DllImport("gdi32.dll")] public static extern bool SetBrushOrgEx(IntPtr hdc, int x, int y, IntPtr previous);
         [DllImport("gdi32.dll")] public static extern bool GdiFlush();
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr CreateWindowEx(int exStyle, string className, string windowName, int style,
+            int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+        [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint colorKey, byte alpha, uint flags);
+        [DllImport("user32.dll")] public static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
+        [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
+        [DllImport("gdi32.dll")] public static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+
         [DllImport("Magnification.dll")] public static extern bool MagInitialize();
         [DllImport("Magnification.dll")] public static extern bool MagUninitialize();
         [DllImport("Magnification.dll")] public static extern bool MagSetFullscreenTransform(float level, int xOffset, int yOffset);
+        [DllImport("Magnification.dll")] public static extern bool MagSetWindowSource(IntPtr hwnd, RECT source);
+        [DllImport("Magnification.dll")] public static extern bool MagSetWindowTransform(IntPtr hwnd, ref MAGTRANSFORM transform);
+        [DllImport("Magnification.dll")]
+        public static extern bool MagSetWindowFilterList(IntPtr hwnd, int filterMode, int count, IntPtr[] windows);
+        [DllImport("Magnification.dll")] public static extern bool MagSetLensUseBitmapSmoothing(IntPtr hwnd, bool enabled);
     }
 }

@@ -22,6 +22,9 @@ namespace Loupe
 
         public bool Smooth = true;
 
+        // Use the lens variant that appears in screenshots, recordings and screen sharing.
+        public bool ShowInRecordings = false;
+
         static string FilePath
         {
             get
@@ -52,6 +55,7 @@ namespace Loupe
                         case "LensWidth": int.TryParse(value, out s.LensWidth); break;
                         case "LensHeight": int.TryParse(value, out s.LensHeight); break;
                         case "Smooth": bool.TryParse(value, out s.Smooth); break;
+                        case "ShowInRecordings": bool.TryParse(value, out s.ShowInRecordings); break;
                     }
                 }
             }
@@ -74,6 +78,7 @@ namespace Loupe
                     "LensWidth=" + LensWidth,
                     "LensHeight=" + LensHeight,
                     "Smooth=" + Smooth,
+                    "ShowInRecordings=" + ShowInRecordings,
                 });
             }
             catch (IOException) { }

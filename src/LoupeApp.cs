@@ -22,7 +22,8 @@ namespace Loupe
 
         readonly Settings settings = Settings.Load();
         readonly NotifyIcon tray = new NotifyIcon();
-        readonly LensWindow lens = new LensWindow();
+        LensWindow privateLens;
+        RecordableLensWindow recordableLens;
         readonly FullscreenMagnifier fullscreen = new FullscreenMagnifier();
         readonly Timer timer = new Timer { Interval = 15 };
         readonly Native.LowLevelHookProc mouseProc;
@@ -65,6 +66,17 @@ namespace Loupe
         static string T(string english, string spanish)
         {
             return Text.T(english, spanish);
+        }
+
+        /// <summary>The lens variant selected in the menu, created on first use.</summary>
+        ILens Lens
+        {
+            get
+            {
+                if (settings.ShowInRecordings)
+                    return recordableLens ?? (recordableLens = new RecordableLensWindow());
+                return privateLens ?? (privateLens = new LensWindow());
+            }
         }
 
         string ShortcutLabel
@@ -150,7 +162,7 @@ namespace Loupe
             {
                 // The lens starts its exit animation as soon as the target drops to 1×,
                 // while the magnification keeps easing out underneath it.
-                lens.Update(cursor, currentZoom, settings, targetZoom > 1.0);
+                Lens.Update(cursor, currentZoom, settings, targetZoom > 1.0);
             }
             else
             {
@@ -158,14 +170,15 @@ namespace Loupe
                 else fullscreen.Reset();
             }
 
-            if (!zoomed && !lens.IsShown) timer.Stop();
+            if (!zoomed && !Lens.IsShown) timer.Stop();
         }
 
         void ResetZoom()
         {
             targetZoom = currentZoom = 1.0;
             timer.Stop();
-            lens.HideLens();
+            if (privateLens != null) privateLens.HideLens();
+            if (recordableLens != null) recordableLens.HideLens();
             fullscreen.Reset();
         }
 
@@ -206,6 +219,12 @@ namespace Loupe
 
             menu.Items.Add(Item(T("Smooth scaling", "Suavizar imagen"), settings.Smooth,
                 delegate { settings.Smooth = !settings.Smooth; OnSettingsChanged(); }));
+            var recordable = Item(T("Show lens in recordings", "Mostrar lupa en grabaciones"), settings.ShowInRecordings,
+                delegate { settings.ShowInRecordings = !settings.ShowInRecordings; OnSettingsChanged(); });
+            recordable.ToolTipText = T(
+                "Visible to screenshots, screen recorders and screen sharing. Corners are slightly less smooth.",
+                "Visible en capturas, grabaciones y al compartir pantalla. Las esquinas quedan algo menos suaves.");
+            menu.Items.Add(recordable);
             menu.Items.Add(Item(T("Start with Windows", "Iniciar con Windows"), IsAutostartEnabled(),
                 delegate { SetAutostart(!IsAutostartEnabled()); BuildMenu(); }));
 
@@ -284,7 +303,9 @@ namespace Loupe
             fullscreen.Dispose();
             tray.Visible = false;
             tray.Dispose();
-            lens.Dispose();
+            if (privateLens != null) privateLens.Dispose();
+            if (recordableLens != null) recordableLens.Dispose();
+            Magnification.Shutdown();
             ExitThread();
         }
     }
