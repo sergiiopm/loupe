@@ -28,6 +28,8 @@ reading tiny text or inspecting pixels.
 - **Floating lens.** A rounded window with a soft shadow follows the pointer and magnifies the area
   beneath it. It grows and fades in when it opens and eases away when it closes. Clicks pass
   straight through, so you can keep working while zoomed.
+- **Shows up in recordings, if you want.** Turn on *Show lens in recordings* to make the lens
+  visible to screenshots, screen recorders (OBS, Loom, Snipping Tool…) and screen sharing.
 - **Full-screen mode.** Magnifies the whole primary monitor instead, like macOS full-screen zoom.
 - **Resizable.** <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + scroll changes the lens size.
 - **High-DPI and multi-monitor aware.** The lens works across monitors at any display scaling.
@@ -45,7 +47,8 @@ reading tiny text or inspecting pixels.
 | Close the zoom instantly       | <kbd>Esc</kbd>                                               |
 
 Right-click the tray icon to switch between lens and full-screen mode, pick a lens size, change the
-shortcut to plain <kbd>Ctrl</kbd> + scroll, toggle smooth scaling or start Loupe with Windows.
+shortcut to plain <kbd>Ctrl</kbd> + scroll, toggle smooth scaling, show the lens in recordings or
+start Loupe with Windows.
 Settings are stored in `%APPDATA%\Loupe\config.ini`.
 
 ## Install
@@ -80,12 +83,18 @@ powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1
   result with `UpdateLayeredWindow`.
 - The lens excludes itself from screen capture (`WDA_EXCLUDEFROMCAPTURE`), which is what lets it copy
   the screen beneath it without magnifying its own reflection.
+- With *Show lens in recordings* on, the lens instead hosts the Magnification API's magnifier control,
+  which renders the desktop while skipping the lens's own windows (`MagSetWindowFilterList`). That way
+  it doesn't need to hide from capture. The shadow is drawn by a separate layered window beneath it.
 - **Full-screen mode** uses the Windows Magnification API (`MagSetFullscreenTransform`).
 
 ## Limitations
 
-- Because the lens is excluded from capture, **it doesn't appear in screenshots, screen recordings or
-  screen sharing.** Only you see it on your monitor.
+- By default the lens is excluded from capture, so **it doesn't appear in screenshots, screen
+  recordings or screen sharing**. Turn on *Show lens in recordings* for that; in that mode the rounded
+  corners come from a window region and aren't anti-aliased, and DRM-protected video may show as
+  black inside the lens.
+- Full-screen mode always shows up in recordings.
 - Full-screen mode only magnifies the primary monitor.
 - Windows doesn't deliver mouse-wheel events from apps running as administrator to non-elevated
   hooks, so the shortcut won't trigger over those windows unless Loupe also runs as administrator.
@@ -96,7 +105,13 @@ powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1
 src/
   Program.cs              entry point, DPI awareness, single instance
   LoupeApp.cs             tray icon, menu, mouse hook and zoom animation
-  LensWindow.cs           the floating lens and its macOS-style chrome
+  ILens.cs                common interface of the two lens variants
+  LensWindow.cs           default lens: copies the screen, hidden from capture
+  RecordableLensWindow.cs lens built on the magnifier control, visible to capture
+  LensChrome.cs           rounded corners, shadow and hairline edge
+  LensAnimation.cs        appear / disappear animation
+  DibSurface.cs           32-bit drawing surface for layered windows
+  Magnification.cs        Magnification API lifetime
   FullscreenMagnifier.cs  full-screen zoom via the Magnification API
   Settings.cs             persisted preferences
   Text.cs                 English / Spanish strings
