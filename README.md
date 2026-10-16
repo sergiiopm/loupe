@@ -76,8 +76,13 @@ powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1
 
 ## How it works
 
-- A **low-level mouse hook** (`WH_MOUSE_LL`) watches the wheel. When the shortcut is held, the event
-  is consumed and turns into a zoom target that is eased towards every frame.
+- **Low-level mouse and keyboard hooks** (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) watch the wheel and Esc.
+  They run on their own thread, because every input event in the system waits for them; that way a
+  slow frame can never make the pointer lag. When the shortcut is held the wheel event is consumed and
+  becomes a zoom target that the zoom eases towards.
+- **Rendering** happens in an idle loop on the UI thread, one frame per display refresh: each frame
+  either waits on the compositor itself or calls `DwmFlush`. Animations are time-based, so they run at
+  the same speed on 60 Hz and 144 Hz screens.
 - The **lens** is a click-through, per-pixel-alpha layered window. Each frame it `StretchBlt`s the
   screen area around the pointer, composites it with a cached shadow and hairline edge, and pushes the
   result with `UpdateLayeredWindow`.
@@ -86,6 +91,8 @@ powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1
 - With *Show lens in recordings* on, the lens instead hosts the Magnification API's magnifier control,
   which renders the desktop while skipping the lens's own windows (`MagSetWindowFilterList`). That way
   it doesn't need to hide from capture. The shadow is drawn by a separate layered window beneath it.
+  Every magnifier call waits for a composition, so this lens only changes the transform when the zoom
+  changes, never forces extra repaints, and fades in and out instead of growing.
 - **Full-screen mode** uses the Windows Magnification API (`MagSetFullscreenTransform`).
 
 ## Limitations
@@ -104,7 +111,8 @@ powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1
 ```
 src/
   Program.cs              entry point, DPI awareness, single instance
-  LoupeApp.cs             tray icon, menu, mouse hook and zoom animation
+  LoupeApp.cs             tray icon, menu, zoom easing and render loop
+  InputHooks.cs           mouse and keyboard hooks on their own thread
   ILens.cs                common interface of the two lens variants
   LensWindow.cs           default lens: copies the screen, hidden from capture
   RecordableLensWindow.cs lens built on the magnifier control, visible to capture
