@@ -145,19 +145,20 @@ namespace Loupe
             Native.GetCursorPos(out p);
             var cursor = new Point(p.X, p.Y);
 
-            bool active = currentZoom > 1.001;
+            bool zoomed = currentZoom > 1.001;
             if (settings.Mode == ZoomMode.Lens)
             {
-                if (active) lens.Render(cursor, currentZoom, settings);
-                else lens.HideLens();
+                // The lens starts its exit animation as soon as the target drops to 1×,
+                // while the magnification keeps easing out underneath it.
+                lens.Update(cursor, currentZoom, settings, targetZoom > 1.0);
             }
             else
             {
-                if (active) fullscreen.Apply(cursor, currentZoom);
+                if (zoomed) fullscreen.Apply(cursor, currentZoom);
                 else fullscreen.Reset();
             }
 
-            if (!active) timer.Stop();
+            if (!zoomed && !lens.IsShown) timer.Stop();
         }
 
         void ResetZoom()

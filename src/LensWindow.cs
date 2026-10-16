@@ -20,8 +20,19 @@ namespace Loupe
         const float AmbientBlur = 3f, AmbientOffset = 1f, AmbientOpacity = 0.30f;
         const float DropBlur = 20f, DropOffset = 8f, DropOpacity = 0.40f;
 
+        // Appear / disappear animation: grow from StartScale while fading in, the reverse on the way out.
+        const double ShowSeconds = 0.22;
+        const double HideSeconds = 0.18;
+        const float StartScale = 0.9f;
+
+        // Two 32-bit surfaces: the composited lens, and a scratch copy for scaled animation frames.
         IntPtr memDC, dib, oldBitmap, bits;
+        IntPtr animDC, animDib, animOldBitmap, animBits;
         int surfaceWidth, surfaceHeight;
+
+        readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        double lastFrameTime = -1;
+        double presence; // linear animation progress: 0 = hidden, 1 = fully shown
 
         // Chrome cached for the current lens size and DPI scale.
         int lensWidth, lensHeight, margin;
@@ -62,7 +73,38 @@ namespace Loupe
             Native.SetWindowDisplayAffinity(Handle, Native.WDA_EXCLUDEFROMCAPTURE);
         }
 
-        public void Render(Point cursor, double zoom, Settings settings)
+        /// <summary>True while the lens is on screen, including during its exit animation.</summary>
+        public bool IsShown
+        {
+            get { return visible; }
+        }
+
+        /// <summary>
+        /// Draws one frame. <paramref name="show"/> is where the lens is heading: it animates in or out
+        /// towards that state, and hides itself once the exit animation finishes.
+        /// </summary>
+        public void Update(Point cursor, double zoom, Settings settings, bool show)
+        {
+            double now = clock.Elapsed.TotalSeconds;
+            double elapsed = lastFrameTime < 0 ? 0 : Math.Min(0.05, now - lastFrameTime);
+            lastFrameTime = now;
+
+            presence += show ? elapsed / ShowSeconds : -elapsed / HideSeconds;
+            presence = Math.Max(0, Math.Min(1, presence));
+
+            if (!show && presence <= 0)
+            {
+                HideLens();
+                return;
+            }
+
+            // Ease-out cubic: fast start, gentle settle. Run backwards it accelerates away on exit,
+            // and reversing mid-animation never jumps because it's a function of progress alone.
+            double eased = 1 - Math.Pow(1 - presence, 3);
+            Render(cursor, Math.Max(1.0, zoom), settings, (float)eased);
+        }
+
+        void Render(Point cursor, double zoom, Settings settings, float appearance)
         {
             float scale = Native.GetScaleAt(cursor);
             int width = (int)Math.Round(settings.LensWidth * scale);
@@ -88,16 +130,23 @@ namespace Loupe
 
                 Composite();
 
+                IntPtr frameDC = memDC;
+                if (appearance < 0.999f)
+                {
+                    DrawScaledFrame(StartScale + (1 - StartScale) * appearance);
+                    frameDC = animDC;
+                }
+
                 var position = new Native.POINT { X = cursor.X - width / 2 - margin, Y = cursor.Y - height / 2 - margin };
                 var size = new Native.SIZE { cx = surfaceWidth, cy = surfaceHeight };
                 var origin = new Native.POINT();
                 var blend = new Native.BLENDFUNCTION
                 {
                     BlendOp = Native.AC_SRC_OVER,
-                    SourceConstantAlpha = 255,
+                    SourceConstantAlpha = (byte)Math.Round(255 * Math.Max(0f, Math.Min(1f, appearance))),
                     AlphaFormat = Native.AC_SRC_ALPHA,
                 };
-                Native.UpdateLayeredWindow(Handle, screenDC, ref position, ref size, memDC, ref origin, 0,
+                Native.UpdateLayeredWindow(Handle, screenDC, ref position, ref size, frameDC, ref origin, 0,
                                            ref blend, Native.ULW_ALPHA);
             }
             finally
@@ -114,11 +163,31 @@ namespace Loupe
                                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
         }
 
+        /// <summary>Hides the lens immediately, without animating.</summary>
         public void HideLens()
         {
+            presence = 0;
+            lastFrameTime = -1;
             if (!visible) return;
             Native.ShowWindow(Handle, Native.SW_HIDE);
             visible = false;
+        }
+
+        /// <summary>Copies the composited lens into the scratch surface, scaled around its centre.</summary>
+        void DrawScaledFrame(float scale)
+        {
+            int stride = surfaceWidth * 4;
+            using (var source = new Bitmap(surfaceWidth, surfaceHeight, stride, PixelFormat.Format32bppPArgb, bits))
+            using (var target = new Bitmap(surfaceWidth, surfaceHeight, stride, PixelFormat.Format32bppPArgb, animBits))
+            using (var g = Graphics.FromImage(target))
+            {
+                g.Clear(Color.Transparent);
+                g.InterpolationMode = InterpolationMode.Bilinear;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+
+                float w = surfaceWidth * scale, h = surfaceHeight * scale;
+                g.DrawImage(source, new RectangleF((surfaceWidth - w) / 2, (surfaceHeight - h) / 2, w, h));
+            }
         }
 
         // ---------------------------------------------------------------- compositing
@@ -330,6 +399,14 @@ namespace Loupe
             if (memDC != IntPtr.Zero && w == surfaceWidth && h == surfaceHeight) return;
             FreeSurface();
 
+            CreateDib(w, h, out memDC, out dib, out oldBitmap, out bits);
+            CreateDib(w, h, out animDC, out animDib, out animOldBitmap, out animBits);
+            surfaceWidth = w;
+            surfaceHeight = h;
+        }
+
+        static void CreateDib(int w, int h, out IntPtr dc, out IntPtr bitmap, out IntPtr previous, out IntPtr pixels)
+        {
             var info = new Native.BITMAPINFOHEADER
             {
                 biSize = Marshal.SizeOf(typeof(Native.BITMAPINFOHEADER)),
@@ -340,22 +417,25 @@ namespace Loupe
             };
 
             IntPtr screenDC = Native.GetDC(IntPtr.Zero);
-            memDC = Native.CreateCompatibleDC(screenDC);
-            dib = Native.CreateDIBSection(screenDC, ref info, 0, out bits, IntPtr.Zero, 0);
-            oldBitmap = Native.SelectObject(memDC, dib);
+            dc = Native.CreateCompatibleDC(screenDC);
+            bitmap = Native.CreateDIBSection(screenDC, ref info, 0, out pixels, IntPtr.Zero, 0);
+            previous = Native.SelectObject(dc, bitmap);
             Native.ReleaseDC(IntPtr.Zero, screenDC);
+        }
 
-            surfaceWidth = w;
-            surfaceHeight = h;
+        static void FreeDib(ref IntPtr dc, ref IntPtr bitmap, ref IntPtr previous, ref IntPtr pixels)
+        {
+            if (dc == IntPtr.Zero) return;
+            Native.SelectObject(dc, previous);
+            Native.DeleteObject(bitmap);
+            Native.DeleteDC(dc);
+            dc = bitmap = previous = pixels = IntPtr.Zero;
         }
 
         void FreeSurface()
         {
-            if (memDC == IntPtr.Zero) return;
-            Native.SelectObject(memDC, oldBitmap);
-            Native.DeleteObject(dib);
-            Native.DeleteDC(memDC);
-            memDC = dib = oldBitmap = bits = IntPtr.Zero;
+            FreeDib(ref memDC, ref dib, ref oldBitmap, ref bits);
+            FreeDib(ref animDC, ref animDib, ref animOldBitmap, ref animBits);
         }
 
         static double Clamp(double value, double min, double max)

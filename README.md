@@ -26,7 +26,8 @@ reading tiny text or inspecting pixels.
 
 - **Scroll to zoom.** <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + scroll zooms in and out smoothly, up to 20×.
 - **Floating lens.** A rounded window with a soft shadow follows the pointer and magnifies the area
-  beneath it. Clicks pass straight through, so you can keep working while zoomed.
+  beneath it. It grows and fades in when it opens and eases away when it closes. Clicks pass
+  straight through, so you can keep working while zoomed.
 - **Full-screen mode.** Magnifies the whole primary monitor instead, like macOS full-screen zoom.
 - **Resizable.** <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + scroll changes the lens size.
 - **High-DPI and multi-monitor aware.** The lens works across monitors at any display scaling.
